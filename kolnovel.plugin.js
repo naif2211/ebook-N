@@ -6,11 +6,11 @@ async function getDoc(path) {
   return harbor.parseHtml(res.body);
 }
 
-function clean(v) {
-  return (v || "").replace(/\s+/g, " ").trim();
+function clean(value) {
+  return (value || "").replace(/\s+/g, " ").trim();
 }
 
-function abs(url) {
+function absolute(url) {
   if (!url) return undefined;
   if (/^https?:\/\//i.test(url)) return url;
   if (url.indexOf("//") === 0) return "https:" + url;
@@ -18,70 +18,81 @@ function abs(url) {
   return BASE + "/" + url;
 }
 
+function pathFromHref(href) {
+  if (!href) return null;
+  var value = href.trim();
+  if (/^https?:\/\//i.test(value)) value = value.replace(/^https?:\/\/[^/]+/i, "");
+  if (value.indexOf("//") === 0) value = value.replace(/^\/\/[^/]+/i, "");
+  if (value.charAt(0) !== "/") value = "/" + value;
+  return value;
+}
+
 function seriesPath(id) {
-  id = id || "";
-  if (id.indexOf("/series/") === 0) return id;
-  return "/series/" + id.replace(/^\/+|\/+$/g, "") + "/";
+  var value = id || "";
+  if (value.indexOf("/series/") === 0) return value;
+  return "/series/" + value.replace(/^\/+|\/+$/g, "") + "/";
 }
 
 function seriesId(href) {
-  var m = (href || "").match(/\/series\/([^?#]+)\/?$/i);
-  return m ? m[1] : null;
-}
-
-function chapterId(href) {
-  var value = href || "";
-  var m = value.match(/(?:https?:\/\/[^/]+)?\/(shaag24[^/?#]+-\d+)\/?$/i);
-  return m ? m[1] : null;
+  var path = pathFromHref(href);
+  if (!path) return null;
+  var match = path.match(/^\/series\/([^/?#]+)\/?$/i);
+  return match ? match[1] : null;
 }
 
 function chapterNumber(text) {
-  var m = clean(text).match(/(?:الفصل|chapter)\s*(\d+(?:\.\d+)?)/iu);
-  return m ? m[1] : undefined;
+  var match = clean(text).match(/(?:الفصل|chapter)\s*(\d+(?:\.\d+)?)/iu);
+  return match ? match[1] : undefined;
 }
 
-function imageUrl(node) {
-  if (!node) return undefined;
-  return abs(node.attr("data-src") || node.attr("data-lazy-src") || node.attr("src"));
+function chapterFromHref(href) {
+  var path = pathFromHref(href);
+  if (!path || path.indexOf("/shaag24") !== 0) return null;
+  return path.replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-function makeSummary(a) {
-  var href = a.attr("href") || "";
-  var id = seriesId(href);
+function imageUrl(img) {
+  if (!img) return undefined;
+  return absolute(img.attr("data-src") || img.attr("data-lazy-src") || img.attr("data-original") || img.attr("src"));
+}
+
+function cardToSummary(card) {
+  var link = card.querySelector(".post-title a");
+  if (!link) {
+    var links = card.querySelectorAll("a");
+    for (var i = 0; i < links.length; i++) {
+      if (seriesId(links[i].attr("href") || "")) { link = links[i]; break; }
+    }
+  }
+  if (!link) return null;
+
+  var id = seriesId(link.attr("href") || "");
   if (!id) return null;
-  var title = clean(a.attr("title") || a.text());
-  var img = a.querySelector("img");
+
+  var title = clean(link.text()) || clean(link.attr("title"));
+  var img = card.querySelector(".summary_image img, img.img-responsive, img");
   if (!title && img) title = clean(img.attr("alt"));
   if (!title) return null;
+
   return { id: id, title: title, cover: imageUrl(img) };
 }
 
-function uniqueSummaries(doc) {
-  var out = [];
-  var seen = {};
-  var links = doc.querySelectorAll("a");
-  for (var i = 0; i < links.length; i++) {
-    var item = makeSummary(links[i]);
-    if (!item || seen[item.id]) continue;
-    seen[item.id] = true;
-    out.push(item);
-  }
-  return out;
-}
+function listCards(doc) {
+  var selectors = [".page-item-detail", ".c-tabs-item__content"];
 
-function chapterLinks(doc) {
-  var out = [];
-  var links = doc.querySelectorAll("a");
-  var seen = {};
-  for (var i = 0; i < links.length; i++) {
-    var href = links[i].attr("href") || "";
-    if (href.toLowerCase().indexOf("shaag24") === -1) continue;
-    var cid = chapterId(href);
-    if (!cid || seen[cid]) continue;
-    seen[cid] = true;
-    out.push(links[i]);
+  for (var s = 0; s < selectors.length; s++) {
+    var cards = doc.querySelectorAll(selectors[s]);
+    if (!cards.length) continue;
+    var out = [], seen = {};
+    for (var i = 0; i < cards.length; i++) {
+      var item = cardToSummary(cards[i]);
+      if (!item || seen[item.id]) continue;
+      seen[item.id] = true;
+      out.push(item);
+    }
+    if (out.length) return out;
   }
-  return out;
+  return [];
 }
 
 const plugin = {
@@ -90,81 +101,91 @@ const plugin = {
 
   async popular(offset) {
     var page = Math.floor((offset || 0) / 24) + 1;
-    var doc = await getDoc(page === 1 ? "/" : "/page/" + page + "/");
-    return uniqueSummaries(doc);
+    return listCards(await getDoc(page === 1 ? "/" : "/page/" + page + "/"));
   },
 
   async search(query, offset) {
     var page = Math.floor((offset || 0) / 24) + 1;
-    var path = "/?s=" + encodeURIComponent(query || "");
+    var path = "/?s=" + encodeURIComponent(query || "") + "&post_type=wp-manga";
     if (page > 1) path += "&paged=" + page;
-    return uniqueSummaries(await getDoc(path));
+    return listCards(await getDoc(path));
   },
 
   async detail(id) {
     var doc = await getDoc(seriesPath(id));
-    var h1 = doc.querySelector("h1");
-    var title = clean(h1 ? h1.text() : id);
-    var cover = doc.querySelector("img");
-    var links = chapterLinks(doc);
-    var genres = doc.querySelectorAll("a[rel='tag']").map(function(n) { return clean(n.text()); }).filter(Boolean);
+    var titleNode = doc.querySelector(".post-title h1");
+    var summaryNode = doc.querySelector(".description-summary .summary__content");
+    var authorNode = doc.querySelector(".author-content a");
+    var statusNode = doc.querySelector(".post-status .summary-content");
+    var cover = doc.querySelector(".summary_image img") || doc.querySelector("img");
+    var genreNodes = doc.querySelectorAll(".genres-content a");
+    var chapterNodes = doc.querySelectorAll(".wp-manga-chapter a");
+    var genres = [];
+    for (var i = 0; i < genreNodes.length; i++) {
+      var g = clean(genreNodes[i].text());
+      if (g) genres.push(g);
+    }
     return {
       id: id,
-      title: title,
+      title: clean(titleNode ? titleNode.text() : "") || clean(id),
       cover: imageUrl(cover),
-      description: clean(doc.querySelector(".summary") ? doc.querySelector(".summary").text() : "") || undefined,
-      author: clean(doc.querySelector(".author") ? doc.querySelector(".author").text() : "") || undefined,
-      genres: genres,
-      status: clean(doc.querySelector(".status") ? doc.querySelector(".status").text() : "") || undefined,
+      description: summaryNode ? clean(summaryNode.text()) : undefined,
+      author: authorNode ? clean(authorNode.text()) : undefined,
+      status: statusNode ? clean(statusNode.text()) : undefined,
       originalLanguage: "zh",
-      chapters: links.length || undefined
+      genres: genres,
+      chapters: chapterNodes.length || undefined
     };
   },
 
   async chapters(id) {
     var doc = await getDoc(seriesPath(id));
-    var links = chapterLinks(doc);
-    var result = [];
+    var nodes = doc.querySelectorAll(".wp-manga-chapter");
+    var result = [], seen = {};
 
-    for (var i = 0; i < links.length; i++) {
-      var a = links[i];
-      var href = a.attr("href") || "";
-      var cid = chapterId(href);
-      if (!cid) continue;
+    for (var i = 0; i < nodes.length; i++) {
+      var a = nodes[i].querySelector("a");
+      if (!a) continue;
+      var chapterId = chapterFromHref(a.attr("href") || "");
+      if (!chapterId || seen[chapterId]) continue;
+      seen[chapterId] = true;
       var text = clean(a.text());
-      var number = a.attr("data-number") || chapterNumber(text);
+      var number = chapterNumber(text);
+      var dateNode = nodes[i].querySelector(".chapter-release-date");
       result.push({
-        id: cid,
+        id: chapterId,
         chapter: number || undefined,
-        title: text || (number ? "الفصل " + number : cid),
+        title: text || (number ? "الفصل " + number : chapterId),
         position: result.length,
         pages: 0,
-        language: "ar"
+        language: "ar",
+        publishAt: dateNode ? clean(dateNode.text()) : undefined
       });
     }
 
-    return result;
+    return result.reverse();
   },
 
   async content(chapterIdValue) {
-    var doc = await getDoc("/" + (chapterIdValue || "").replace(/^\/+/, "") + "/");
-    var selectors = [
-      ".reading-content p",
-      ".chapter-content p",
-      ".entry-content p",
-      ".post-content p",
-      "article p"
-    ];
+    var path = pathFromHref(chapterIdValue);
+    if (!path) throw new Error("Invalid chapter id");
+    var doc = await getDoc(path);
 
-    for (var i = 0; i < selectors.length; i++) {
-      var nodes = doc.querySelectorAll(selectors[i]);
-      var text = nodes.map(function(n) { return clean(n.text()); }).filter(Boolean);
-      if (text.length >= 3) return text.join("\n\n");
+    var blocks = doc.querySelectorAll(".text-left p");
+    var text = [];
+    for (var i = 0; i < blocks.length; i++) {
+      var value = clean(blocks[i].text());
+      if (value) text.push(value);
+    }
+    if (text.length) return text.join("\n\n");
+
+    var container = doc.querySelector(".text-left");
+    if (container) {
+      var containerText = clean(container.text());
+      if (containerText) return containerText;
     }
 
-    return doc.querySelectorAll("p").map(function(n) {
-      return clean(n.text());
-    }).filter(Boolean).join("\n\n");
+    return "";
   },
 
   async tags() {
