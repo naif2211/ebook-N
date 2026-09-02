@@ -10,7 +10,7 @@ function clean(value) {
   return (value || "").replace(/\s+/g, " ").trim();
 }
 
-function absolute(url) {
+function abs(url) {
   if (!url) return undefined;
   if (/^https?:\/\//i.test(url)) return url;
   if (url.indexOf("//") === 0) return "https:" + url;
@@ -19,8 +19,8 @@ function absolute(url) {
 }
 
 function pathFromHref(href) {
-  if (!href) return null;
-  var value = href.trim();
+  var value = clean(href);
+  if (!value) return null;
   if (/^https?:\/\//i.test(value)) value = value.replace(/^https?:\/\/[^/]+/i, "");
   if (value.indexOf("//") === 0) value = value.replace(/^\/\/[^/]+/i, "");
   if (value.charAt(0) !== "/") value = "/" + value;
@@ -28,7 +28,8 @@ function pathFromHref(href) {
 }
 
 function seriesPath(id) {
-  var value = id || "";
+  var value = clean(id);
+  if (value.indexOf("http://") === 0 || value.indexOf("https://") === 0) return pathFromHref(value);
   if (value.indexOf("/series/") === 0) return value;
   return "/series/" + value.replace(/^\/+|\/+$/g, "") + "/";
 }
@@ -40,23 +41,23 @@ function seriesId(href) {
   return match ? match[1] : null;
 }
 
-function chapterNumber(text) {
-  var match = clean(text).match(/(?:الفصل|chapter)\s*(\d+(?:\.\d+)?)/iu);
-  return match ? match[1] : undefined;
-}
-
 function chapterFromHref(href) {
   var path = pathFromHref(href);
   if (!path || path.indexOf("/shaag24") !== 0) return null;
   return path.replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-function imageUrl(img) {
-  if (!img) return undefined;
-  return absolute(img.attr("data-src") || img.attr("data-lazy-src") || img.attr("data-original") || img.attr("src"));
+function chapterNumber(text) {
+  var match = clean(text).match(/(?:الفصل|chapter|ch\.?)\s*(\d+(?:\.\d+)?)/iu);
+  return match ? match[1] : undefined;
 }
 
-function cardToSummary(card) {
+function imageUrl(img) {
+  if (!img) return undefined;
+  return abs(img.attr("data-src") || img.attr("data-lazy-src") || img.attr("data-original") || img.attr("src"));
+}
+
+function makeSummary(card) {
   var link = card.querySelector(".post-title a");
   if (!link) {
     var links = card.querySelectorAll("a");
@@ -65,27 +66,23 @@ function cardToSummary(card) {
     }
   }
   if (!link) return null;
-
   var id = seriesId(link.attr("href") || "");
   if (!id) return null;
-
   var title = clean(link.text()) || clean(link.attr("title"));
-  var img = card.querySelector(".summary_image img, img.img-responsive, img");
+  var img = card.querySelector(".summary_image img") || card.querySelector("img.img-responsive") || card.querySelector("img");
   if (!title && img) title = clean(img.attr("alt"));
   if (!title) return null;
-
   return { id: id, title: title, cover: imageUrl(img) };
 }
 
 function listCards(doc) {
   var selectors = [".page-item-detail", ".c-tabs-item__content"];
-
   for (var s = 0; s < selectors.length; s++) {
     var cards = doc.querySelectorAll(selectors[s]);
     if (!cards.length) continue;
     var out = [], seen = {};
     for (var i = 0; i < cards.length; i++) {
-      var item = cardToSummary(cards[i]);
+      var item = makeSummary(cards[i]);
       if (!item || seen[item.id]) continue;
       seen[item.id] = true;
       out.push(item);
@@ -95,36 +92,54 @@ function listCards(doc) {
   return [];
 }
 
+function fallbackSeriesLinks(doc) {
+  var links = doc.querySelectorAll("a");
+  var out = [], seen = {};
+  for (var i = 0; i < links.length; i++) {
+    var id = seriesId(links[i].attr("href") || "");
+    if (!id || seen[id]) continue;
+    var title = clean(links[i].text()) || clean(links[i].attr("title"));
+    if (!title) continue;
+    seen[id] = true;
+    out.push({ id: id, title: title });
+  }
+  return out;
+}
+
 const plugin = {
   id: "kolnovel",
   name: "KolNovel",
 
   async popular(offset) {
     var page = Math.floor((offset || 0) / 24) + 1;
-    return listCards(await getDoc(page === 1 ? "/" : "/page/" + page + "/"));
+    var doc = await getDoc("/series/?page=" + page + "&m_orderby=views");
+    var result = listCards(doc);
+    return result.length ? result : fallbackSeriesLinks(doc);
   },
 
   async search(query, offset) {
     var page = Math.floor((offset || 0) / 24) + 1;
     var path = "/?s=" + encodeURIComponent(query || "") + "&post_type=wp-manga";
     if (page > 1) path += "&paged=" + page;
-    return listCards(await getDoc(path));
+    var doc = await getDoc(path);
+    var result = listCards(doc);
+    return result.length ? result : fallbackSeriesLinks(doc);
   },
 
   async detail(id) {
     var doc = await getDoc(seriesPath(id));
-    var titleNode = doc.querySelector(".post-title h1");
+    var titleNode = doc.querySelector(".post-title h1") || doc.querySelector("h1");
     var summaryNode = doc.querySelector(".description-summary .summary__content");
     var authorNode = doc.querySelector(".author-content a");
     var statusNode = doc.querySelector(".post-status .summary-content");
-    var cover = doc.querySelector(".summary_image img") || doc.querySelector("img");
+    var cover = doc.querySelector(".summary_image img") || doc.querySelector("img[alt]") || doc.querySelector("img");
     var genreNodes = doc.querySelectorAll(".genres-content a");
-    var chapterNodes = doc.querySelectorAll(".wp-manga-chapter a");
     var genres = [];
     for (var i = 0; i < genreNodes.length; i++) {
       var g = clean(genreNodes[i].text());
       if (g) genres.push(g);
     }
+    var chapterNodes = doc.querySelectorAll(".wp-manga-chapter");
     return {
       id: id,
       title: clean(titleNode ? titleNode.text() : "") || clean(id),
@@ -140,22 +155,22 @@ const plugin = {
 
   async chapters(id) {
     var doc = await getDoc(seriesPath(id));
-    var nodes = doc.querySelectorAll(".wp-manga-chapter");
+    var rows = doc.querySelectorAll(".wp-manga-chapter");
     var result = [], seen = {};
 
-    for (var i = 0; i < nodes.length; i++) {
-      var a = nodes[i].querySelector("a");
+    for (var i = 0; i < rows.length; i++) {
+      var a = rows[i].querySelector("a");
       if (!a) continue;
-      var chapterId = chapterFromHref(a.attr("href") || "");
-      if (!chapterId || seen[chapterId]) continue;
-      seen[chapterId] = true;
+      var cid = chapterFromHref(a.attr("href") || "");
+      if (!cid || seen[cid]) continue;
+      seen[cid] = true;
       var text = clean(a.text());
       var number = chapterNumber(text);
-      var dateNode = nodes[i].querySelector(".chapter-release-date");
+      var dateNode = rows[i].querySelector(".chapter-release-date");
       result.push({
-        id: chapterId,
+        id: cid,
         chapter: number || undefined,
-        title: text || (number ? "الفصل " + number : chapterId),
+        title: text || (number ? "الفصل " + number : cid),
         position: result.length,
         pages: 0,
         language: "ar",
@@ -163,7 +178,28 @@ const plugin = {
       });
     }
 
-    return result.reverse();
+    if (!result.length) {
+      var links = doc.querySelectorAll("a");
+      for (var j = 0; j < links.length; j++) {
+        var fallbackId = chapterFromHref(links[j].attr("href") || "");
+        if (!fallbackId || seen[fallbackId]) continue;
+        seen[fallbackId] = true;
+        var fallbackText = clean(links[j].text());
+        var fallbackNumber = chapterNumber(fallbackText);
+        result.push({
+          id: fallbackId,
+          chapter: fallbackNumber || undefined,
+          title: fallbackText || (fallbackNumber ? "الفصل " + fallbackNumber : fallbackId),
+          position: result.length,
+          pages: 0,
+          language: "ar"
+        });
+      }
+    }
+
+    result.reverse();
+    for (var k = 0; k < result.length; k++) result[k].position = k;
+    return result;
   },
 
   async content(chapterIdValue) {
@@ -171,27 +207,41 @@ const plugin = {
     if (!path) throw new Error("Invalid chapter id");
     var doc = await getDoc(path);
 
-    var blocks = doc.querySelectorAll(".text-left p");
-    var text = [];
-    for (var i = 0; i < blocks.length; i++) {
-      var value = clean(blocks[i].text());
-      if (value) text.push(value);
-    }
-    if (text.length) return text.join("\n\n");
+    var selectors = [
+      ".text-left p",
+      ".reading-content p",
+      ".chapter-content p",
+      ".entry-content p",
+      ".post-content p"
+    ];
 
-    var container = doc.querySelector(".text-left");
-    if (container) {
+    for (var i = 0; i < selectors.length; i++) {
+      var nodes = doc.querySelectorAll(selectors[i]);
+      var parts = [];
+      for (var j = 0; j < nodes.length; j++) {
+        var value = clean(nodes[j].text());
+        if (!value) continue;
+        if (/^(Facebook|Twitter|WhatsApp|Pinterest|Telegram)$/iu.test(value)) continue;
+        parts.push(value);
+      }
+      if (parts.length >= 2) return parts.join("\n\n");
+    }
+
+    var containers = [".text-left", ".reading-content", ".chapter-content", ".entry-content", ".post-content"];
+    for (var c = 0; c < containers.length; c++) {
+      var container = doc.querySelector(containers[c]);
+      if (!container) continue;
       var containerText = clean(container.text());
       if (containerText) return containerText;
     }
-
     return "";
   },
 
   async tags() {
     return [
       { id: "ongoing", name: "مستمرة", group: "الحالة" },
-      { id: "completed", name: "مكتملة", group: "الحالة" }
+      { id: "completed", name: "مكتملة", group: "الحالة" },
+      { id: "views", name: "الأكثر مشاهدة", group: "الترتيب" }
     ];
   }
 };
