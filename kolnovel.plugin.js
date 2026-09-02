@@ -1,9 +1,12 @@
 const BASE = "https://kolnovel.com";
 const PAGE_SIZE = 20;
 
-async function getDoc(path) {
-  const res = await harbor.http(BASE + path, { responseType: "text" });
-  if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
+async function getDoc(pathOrUrl) {
+  var target = abs(pathOrUrl);
+  if (!target) throw new Error("Invalid KolNovel URL");
+
+  const res = await harbor.http(target, { responseType: "text" });
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + target);
   return harbor.parseHtml(res.body);
 }
 
@@ -11,48 +14,56 @@ function clean(value) {
   return (value || "").replace(/\s+/g, " ").trim();
 }
 
-function toPath(href) {
-  var v = clean(href);
-  if (!v) return null;
-  v = v.replace(/^https?:\/\/[^/]+/i, "");
-  if (v.indexOf("//") === 0) v = v.replace(/^\/\/[^/]+/i, "");
-  if (v.charAt(0) !== "/") v = "/" + v;
-  return v;
+function abs(url) {
+  var value = clean(url);
+  if (!value) return undefined;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.indexOf("//") === 0) return "https:" + value;
+  return value.charAt(0) === "/" ? BASE + value : BASE + "/" + value;
 }
 
-function abs(url) {
-  if (!url) return undefined;
-  if (/^https?:\/\//i.test(url)) return url;
-  if (url.indexOf("//") === 0) return "https:" + url;
-  return url.charAt(0) === "/" ? BASE + url : BASE + "/" + url;
+function toPath(href) {
+  var value = clean(href);
+  if (!value) return null;
+
+  // Chapter ids are persisted as paths. Only accept links back to KolNovel.
+  var absolute = value.match(/^https?:\/\/([^/]+)(\/[^?#]*)(\?[^#]*)?(?:#.*)?$/i);
+  if (absolute) {
+    if (!/(^|\.)kolnovel\.com$/i.test(absolute[1])) return null;
+    return absolute[2] + (absolute[3] || "");
+  }
+
+  if (value.indexOf("//") === 0) {
+    var protocolRelative = value.match(/^\/\/([^/]+)(\/[^?#]*)(\?[^#]*)?(?:#.*)?$/i);
+    if (!protocolRelative || !/(^|\.)kolnovel\.com$/i.test(protocolRelative[1])) return null;
+    return protocolRelative[2] + (protocolRelative[3] || "");
+  }
+
+  value = value.replace(/#.*$/, "");
+  return value.charAt(0) === "/" ? value : "/" + value;
 }
 
 function seriesPath(id) {
-  var v = clean(id);
-  if (/^https?:\/\//i.test(v) || v.indexOf("/series/") === 0) return toPath(v);
-  return "/series/" + v.replace(/^\/+|\/+$/g, "") + "/";
+  var value = clean(id);
+  if (!value) throw new Error("Invalid series id");
+  if (/^https?:\/\//i.test(value) || value.indexOf("/series/") === 0) return toPath(value);
+  return "/series/" + value.replace(/^\/+|\/+$/g, "") + "/";
 }
 
 function seriesId(href) {
-  var p = toPath(href);
-  if (!p) return null;
-  var m = p.match(/^\/series\/([^/?#]+)\/?$/i);
-  return m ? m[1] : null;
+  var path = toPath(href);
+  if (!path) return null;
+  var match = path.match(/^\/series\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
+  return match ? match[1] : null;
 }
 
-function chapterId(href) {
-  var p = toPath(href);
-  if (!p) return null;
-  var m = p.match(/^\/(shaag24[^/?#]+)\/?$/i);
-  return m ? m[1] : null;
-}
+function chapterNumber(title, href) {
+  var text = clean(title) + " " + clean(href);
+  var match = text.match(/(?:الفصل|chapter|chap\.?|ch\.?)\s*[._:-]*(\d+(?:\.\d+)?)/iu);
+  if (match) return match[1];
 
-function chapterNumber(text, href) {
-  var s = clean(text) + " " + clean(href);
-  var m = s.match(/(?:الفصل|chapter|chap|ch\.?)\s*[._-]*(\d+(?:\.\d+)?)/iu);
-  if (m) return m[1];
-  m = clean(href).match(/[-_](\d+(?:\.\d+)?)\/?$/);
-  return m ? m[1] : undefined;
+  match = clean(href).match(/[-_](\d+(?:\.\d+)?)(?:\/?(?:\?.*)?)?$/);
+  return match ? match[1] : undefined;
 }
 
 function imageUrl(img) {
@@ -60,88 +71,109 @@ function imageUrl(img) {
   return abs(img.attr("data-src") || img.attr("data-lazy-src") || img.attr("data-original") || img.attr("src"));
 }
 
-function makeSummary(link, root) {
+function firstSeriesLink(root) {
+  var preferred = root.querySelector(".post-title a") || root.querySelector("h3 a") || root.querySelector("h4 a");
+  if (preferred && seriesId(preferred.attr("href") || "")) return preferred;
+
+  var links = root.querySelectorAll("a[href*='/series/']");
+  for (var i = 0; i < links.length; i++) {
+    if (seriesId(links[i].attr("href") || "")) return links[i];
+  }
+  return null;
+}
+
+function makeSummary(root) {
+  var link = firstSeriesLink(root);
+  if (!link) return null;
+
   var id = seriesId(link.attr("href") || "");
-  if (!id) return null;
+  var image = root.querySelector(".summary_image img") || root.querySelector("img");
   var title = clean(link.text()) || clean(link.attr("title"));
-  var img = root ? (root.querySelector(".summary_image img") || root.querySelector("img")) : link.querySelector("img");
-  if (!title && img) title = clean(img.attr("alt"));
-  if (!title) return null;
-  return { id: id, title: title, cover: imageUrl(img) };
+  if (!title && image) title = clean(image.attr("alt"));
+  if (!id || !title) return null;
+
+  return { id: id, title: title, cover: imageUrl(image) };
 }
 
 function listSeries(doc) {
-  var out = [];
+  var result = [];
   var seen = {};
-  var cards = doc.querySelectorAll(".page-item-detail");
+  var cards = doc.querySelectorAll(".page-item-detail, .c-tabs-item__content, .item-summary");
 
   for (var i = 0; i < cards.length; i++) {
-    var links = cards[i].querySelectorAll("a");
+    var item = makeSummary(cards[i]);
+    if (!item || seen[item.id]) continue;
+    seen[item.id] = true;
+    result.push(item);
+  }
+
+  // Search layouts can omit card wrappers, but still use links to /series/.
+  if (!result.length) {
+    var links = doc.querySelectorAll("a[href*='/series/']");
     for (var j = 0; j < links.length; j++) {
-      var item = makeSummary(links[j], cards[i]);
-      if (!item || seen[item.id]) continue;
-      seen[item.id] = true;
-      out.push(item);
-      break;
+      var id = seriesId(links[j].attr("href") || "");
+      var title = clean(links[j].text()) || clean(links[j].attr("title"));
+      if (!id || !title || seen[id]) continue;
+      seen[id] = true;
+      result.push({ id: id, title: title, cover: imageUrl(links[j].querySelector("img")) });
     }
   }
 
-  // Universal fallback for pages whose card class changes.
-  var allLinks = doc.querySelectorAll("a[href]");
-  for (var k = 0; k < allLinks.length; k++) {
-    var id = seriesId(allLinks[k].attr("href") || "");
-    if (!id || seen[id]) continue;
-    var title = clean(allLinks[k].text()) || clean(allLinks[k].attr("title"));
-    var img = allLinks[k].querySelector("img");
-    if (!title && img) title = clean(img.attr("alt"));
-    if (!title) continue;
-    seen[id] = true;
-    out.push({ id: id, title: title, cover: imageUrl(img) });
-  }
-
-  return out;
+  return result;
 }
 
 function readChapters(doc) {
-  var links = doc.querySelectorAll("a[href]");
-  var out = [];
+  var rows = doc.querySelectorAll(".wp-manga-chapter");
+  var result = [];
   var seen = {};
 
-  for (var i = 0; i < links.length; i++) {
-    var href = links[i].attr("href") || "";
-    var id = chapterId(href);
-    if (!id || seen[id]) continue;
+  for (var i = 0; i < rows.length; i++) {
+    var link = rows[i].querySelector("a[href]");
+    if (!link) continue;
 
-    var text = clean(links[i].text());
-    var number = chapterNumber(text, href);
-    if (!number) continue;
+    // Retain KolNovel's exact chapter path. It is what content() must request.
+    var path = toPath(link.attr("href") || "");
+    if (!path || seen[path]) continue;
 
-    seen[id] = true;
-    out.push({
-      id: id,
-      chapter: number,
-      title: text || "الفصل " + number,
-      position: out.length,
+    var title = clean(link.text());
+    var number = chapterNumber(title, path);
+    var date = rows[i].querySelector(".chapter-release-date");
+    seen[path] = true;
+    result.push({
+      id: path,
+      chapter: number || undefined,
+      title: title || (number ? "الفصل " + number : path),
+      position: result.length,
       pages: 0,
-      language: "ar"
+      language: "ar",
+      publishAt: date ? clean(date.text()) : undefined
     });
   }
 
-  // Keep KolNovel's order exactly as returned by the site.
-  for (var p = 0; p < out.length; p++) out[p].position = p;
-  return out;
+  // Do not sort or reverse: Harbor receives the order shown by KolNovel.
+  return result;
+}
+
+function textFrom(doc, selector) {
+  var nodes = doc.querySelectorAll(selector);
+  var parts = [];
+  for (var i = 0; i < nodes.length; i++) {
+    var value = clean(nodes[i].text());
+    if (value) parts.push(value);
+  }
+  return parts.length ? parts.join("\n\n") : "";
 }
 
 function browsePath(page, tagId) {
-  var state = "";
+  var status = "";
   var order = "";
   var tag = clean(tagId);
-  if (tag.indexOf("status:") === 0) state = tag.substring(7);
+  if (tag.indexOf("status:") === 0) status = tag.substring(7);
   if (tag.indexOf("sort:") === 0) order = tag.substring(5);
 
   var path = "/series/?page=" + page;
   if (order) path += "&order=" + encodeURIComponent(order);
-  if (state) path += "&status=" + encodeURIComponent(state);
+  if (status) path += "&status=" + encodeURIComponent(status);
   return path;
 }
 
@@ -156,48 +188,42 @@ const plugin = {
 
   async search(query, offset) {
     var page = Math.floor((offset || 0) / PAGE_SIZE) + 1;
-    var q = clean(query || "");
-    if (!q) return [];
+    var value = clean(query || "");
+    if (!value) return [];
 
-    // Primary KolNovel/WordPress search.
-    var doc = await getDoc("/?s=" + encodeURIComponent(q) + "&post_type=wp-manga" + (page > 1 ? "&paged=" + page : ""));
+    var doc = await getDoc("/?s=" + encodeURIComponent(value) + "&post_type=wp-manga" + (page > 1 ? "&paged=" + page : ""));
     var result = listSeries(doc);
+    if (result.length) return result;
 
-    // Alternate Series search used by some KolNovel deployments.
-    if (!result.length) {
-      var alt = "/series/?s=" + encodeURIComponent(q);
-      if (page > 1) alt += "&page=" + page;
-      result = listSeries(await getDoc(alt));
-    }
-
-    return result;
+    var alternate = "/series/?s=" + encodeURIComponent(value) + (page > 1 ? "&page=" + page : "");
+    return listSeries(await getDoc(alternate));
   },
 
   async detail(id) {
     var doc = await getDoc(seriesPath(id));
     var title = doc.querySelector(".post-title h1") || doc.querySelector("h1");
     var cover = doc.querySelector(".summary_image img") || doc.querySelector("img[alt]") || doc.querySelector("img");
-    var desc = doc.querySelector(".description-summary .summary__content");
+    var description = doc.querySelector(".description-summary .summary__content");
     var author = doc.querySelector(".author-content a");
     var status = doc.querySelector(".post-status .summary-content");
-    var gs = doc.querySelectorAll(".genres-content a");
+    var genreNodes = doc.querySelectorAll(".genres-content a");
     var genres = [];
-    for (var i = 0; i < gs.length; i++) {
-      var g = clean(gs[i].text());
-      if (g) genres.push(g);
+    for (var i = 0; i < genreNodes.length; i++) {
+      var genre = clean(genreNodes[i].text());
+      if (genre) genres.push(genre);
     }
-    var ch = readChapters(doc);
 
+    var chapters = readChapters(doc);
     return {
       id: id,
       title: clean(title ? title.text() : id),
       cover: imageUrl(cover),
-      description: desc ? clean(desc.text()) : undefined,
+      description: description ? clean(description.text()) : undefined,
       author: author ? clean(author.text()) : undefined,
       status: status ? clean(status.text()) : undefined,
       originalLanguage: "zh",
       genres: genres,
-      chapters: ch.length || undefined
+      chapters: chapters.length || undefined
     };
   },
 
@@ -210,34 +236,14 @@ const plugin = {
     if (!path) throw new Error("Invalid chapter id");
 
     var doc = await getDoc(path);
-    var selectors = [
-      ".text-left p",
-      ".text-left > div",
-      ".reading-content p",
-      ".entry-content p",
-      ".post-content p",
-      "article p"
-    ];
-
-    for (var s = 0; s < selectors.length; s++) {
-      var nodes = doc.querySelectorAll(selectors[s]);
-      var parts = [];
-      for (var j = 0; j < nodes.length; j++) {
-        var text = clean(nodes[j].text());
-        if (text) parts.push(text);
-      }
-      if (parts.length >= 2) return parts.join("\n\n");
+    var selectors = [".text-left p", ".reading-content p", ".entry-content p"];
+    for (var i = 0; i < selectors.length; i++) {
+      var content = textFrom(doc, selectors[i]);
+      if (content) return content;
     }
 
-    var boxes = [".text-left", ".reading-content", ".entry-content", ".post-content", "article"];
-    for (var c = 0; c < boxes.length; c++) {
-      var box = doc.querySelector(boxes[c]);
-      if (!box) continue;
-      var value = clean(box.text());
-      if (value) return value;
-    }
-
-    return "";
+    var textLeft = doc.querySelector(".text-left");
+    return textLeft ? clean(textLeft.text()) : "";
   },
 
   async tags() {
