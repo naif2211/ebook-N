@@ -2,7 +2,7 @@ const BASE = "https://kolnovel.com";
 
 async function getDoc(path) {
   const res = await harbor.http(BASE + path, { responseType: "text" });
-  if (!res.ok) throw new Error("HTTP " + res.status);
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
 
@@ -30,7 +30,8 @@ function seriesId(href) {
 }
 
 function chapterId(href) {
-  var m = (href || "").match(/\/(shaag24[^/?#]+-\d+)\/?$/i);
+  var value = href || "";
+  var m = value.match(/(?:https?:\/\/[^/]+)?\/(shaag24[^/?#]+-\d+)\/?$/i);
   return m ? m[1] : null;
 }
 
@@ -50,8 +51,7 @@ function makeSummary(a) {
   if (!id) return null;
   var title = clean(a.attr("title") || a.text());
   var img = a.querySelector("img");
-  if (!img) return null;
-  if (!title) title = clean(img.attr("alt"));
+  if (!title && img) title = clean(img.attr("alt"));
   if (!title) return null;
   return { id: id, title: title, cover: imageUrl(img) };
 }
@@ -59,12 +59,27 @@ function makeSummary(a) {
 function uniqueSummaries(doc) {
   var out = [];
   var seen = {};
-  var links = doc.querySelectorAll("a[href*='/series/']");
+  var links = doc.querySelectorAll("a");
   for (var i = 0; i < links.length; i++) {
     var item = makeSummary(links[i]);
     if (!item || seen[item.id]) continue;
     seen[item.id] = true;
     out.push(item);
+  }
+  return out;
+}
+
+function chapterLinks(doc) {
+  var out = [];
+  var links = doc.querySelectorAll("a");
+  var seen = {};
+  for (var i = 0; i < links.length; i++) {
+    var href = links[i].attr("href") || "";
+    if (href.toLowerCase().indexOf("shaag24") === -1) continue;
+    var cid = chapterId(href);
+    if (!cid || seen[cid]) continue;
+    seen[cid] = true;
+    out.push(links[i]);
   }
   return out;
 }
@@ -91,7 +106,7 @@ const plugin = {
     var h1 = doc.querySelector("h1");
     var title = clean(h1 ? h1.text() : id);
     var cover = doc.querySelector("img");
-    var links = doc.querySelectorAll("a[href*='/shaag24']");
+    var links = chapterLinks(doc);
     var genres = doc.querySelectorAll("a[rel='tag']").map(function(n) { return clean(n.text()); }).filter(Boolean);
     return {
       id: id,
@@ -108,16 +123,14 @@ const plugin = {
 
   async chapters(id) {
     var doc = await getDoc(seriesPath(id));
-    var links = doc.querySelectorAll("a[href*='/shaag24']");
+    var links = chapterLinks(doc);
     var result = [];
-    var seen = {};
 
     for (var i = 0; i < links.length; i++) {
       var a = links[i];
-      var cid = chapterId(a.attr("href") || "");
-      if (!cid || seen[cid]) continue;
-      seen[cid] = true;
-
+      var href = a.attr("href") || "";
+      var cid = chapterId(href);
+      if (!cid) continue;
       var text = clean(a.text());
       var number = a.attr("data-number") || chapterNumber(text);
       result.push({
