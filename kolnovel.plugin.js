@@ -18,92 +18,131 @@ function abs(url) {
   return BASE + "/" + url;
 }
 
-function pathFromHref(href) {
-  var value = clean(href);
-  if (!value) return null;
-  if (/^https?:\/\//i.test(value)) value = value.replace(/^https?:\/\/[^/]+/i, "");
-  if (value.indexOf("//") === 0) value = value.replace(/^\/\/[^/]+/i, "");
-  if (value.charAt(0) !== "/") value = "/" + value;
-  return value;
+function toPath(href) {
+  var v = clean(href);
+  if (!v) return null;
+  v = v.replace(/^https?:\/\/[^/]+/i, "");
+  if (v.indexOf("//") === 0) v = v.replace(/^\/\/[^/]+/i, "");
+  if (v.charAt(0) !== "/") v = "/" + v;
+  return v;
 }
 
 function seriesPath(id) {
-  var value = clean(id);
-  if (value.indexOf("http://") === 0 || value.indexOf("https://") === 0) return pathFromHref(value);
-  if (value.indexOf("/series/") === 0) return value;
-  return "/series/" + value.replace(/^\/+|\/+$/g, "") + "/";
+  var v = clean(id);
+  if (/^https?:\/\//i.test(v)) return toPath(v);
+  if (v.indexOf("/series/") === 0) return v;
+  return "/series/" + v.replace(/^\/+|\/+$/g, "") + "/";
 }
 
-function seriesId(href) {
-  var path = pathFromHref(href);
-  if (!path) return null;
-  var match = path.match(/^\/series\/([^/?#]+)\/?$/i);
-  return match ? match[1] : null;
+function getSeriesId(href) {
+  var p = toPath(href);
+  if (!p) return null;
+  var m = p.match(/^\/series\/([^/?#]+)\/?$/i);
+  return m ? m[1] : null;
 }
 
-function chapterFromHref(href) {
-  var path = pathFromHref(href);
-  if (!path || path.indexOf("/shaag24") !== 0) return null;
-  return path.replace(/^\/+/, "").replace(/\/+$/, "");
+function getChapterId(href) {
+  var p = toPath(href);
+  if (!p) return null;
+  if (p.indexOf("/shaag24") !== 0) return null;
+  return p.substring(1).replace(/\/+$/, "");
 }
 
-function chapterNumber(text) {
-  var match = clean(text).match(/(?:الفصل|chapter|ch\.?)\s*(\d+(?:\.\d+)?)/iu);
-  return match ? match[1] : undefined;
+function getChapterNumber(text) {
+  var s = clean(text);
+  var m = s.match(/(?:الفصل|chapter|ch)\s*([0-9]+(?:\.[0-9]+)?)/i);
+  return m ? m[1] : undefined;
 }
 
-function imageUrl(img) {
+function getImage(img) {
   if (!img) return undefined;
-  return abs(img.attr("data-src") || img.attr("data-lazy-src") || img.attr("data-original") || img.attr("src"));
+  return abs(
+    img.attr("data-src") ||
+    img.attr("data-lazy-src") ||
+    img.attr("data-original") ||
+    img.attr("src")
+  );
 }
 
-function makeSummary(card) {
+function summaryFromCard(card) {
   var link = card.querySelector(".post-title a");
   if (!link) {
     var links = card.querySelectorAll("a");
     for (var i = 0; i < links.length; i++) {
-      if (seriesId(links[i].attr("href") || "")) { link = links[i]; break; }
+      if (getSeriesId(links[i].attr("href") || "")) {
+        link = links[i];
+        break;
+      }
     }
   }
   if (!link) return null;
-  var id = seriesId(link.attr("href") || "");
+
+  var id = getSeriesId(link.attr("href") || "");
   if (!id) return null;
+
   var title = clean(link.text()) || clean(link.attr("title"));
-  var img = card.querySelector(".summary_image img") || card.querySelector("img.img-responsive") || card.querySelector("img");
+  var img = card.querySelector(".summary_image img") || card.querySelector("img");
   if (!title && img) title = clean(img.attr("alt"));
   if (!title) return null;
-  return { id: id, title: title, cover: imageUrl(img) };
+
+  return { id: id, title: title, cover: getImage(img) };
 }
 
-function listCards(doc) {
-  var selectors = [".page-item-detail", ".c-tabs-item__content"];
-  for (var s = 0; s < selectors.length; s++) {
-    var cards = doc.querySelectorAll(selectors[s]);
-    if (!cards.length) continue;
-    var out = [], seen = {};
-    for (var i = 0; i < cards.length; i++) {
-      var item = makeSummary(cards[i]);
-      if (!item || seen[item.id]) continue;
-      seen[item.id] = true;
-      out.push(item);
-    }
-    if (out.length) return out;
+function listSeries(doc) {
+  var cards = doc.querySelectorAll(".page-item-detail");
+  var out = [];
+  var seen = {};
+
+  for (var i = 0; i < cards.length; i++) {
+    var item = summaryFromCard(cards[i]);
+    if (!item || seen[item.id]) continue;
+    seen[item.id] = true;
+    out.push(item);
   }
-  return [];
-}
 
-function fallbackSeriesLinks(doc) {
-  var links = doc.querySelectorAll("a");
-  var out = [], seen = {};
-  for (var i = 0; i < links.length; i++) {
-    var id = seriesId(links[i].attr("href") || "");
+  if (out.length) return out;
+
+  var links = doc.querySelectorAll("a[href*='/series/']");
+  for (var j = 0; j < links.length; j++) {
+    var id = getSeriesId(links[j].attr("href") || "");
     if (!id || seen[id]) continue;
-    var title = clean(links[i].text()) || clean(links[i].attr("title"));
+    var title = clean(links[j].text()) || clean(links[j].attr("title"));
     if (!title) continue;
     seen[id] = true;
     out.push({ id: id, title: title });
   }
   return out;
+}
+
+function readChapterRows(doc) {
+  var rows = doc.querySelectorAll(".wp-manga-chapter");
+  var result = [];
+  var seen = {};
+
+  for (var i = 0; i < rows.length; i++) {
+    var a = rows[i].querySelector("a");
+    if (!a) continue;
+
+    var id = getChapterId(a.attr("href") || "");
+    if (!id || seen[id]) continue;
+    seen[id] = true;
+
+    var title = clean(a.text());
+    var number = getChapterNumber(title);
+    var date = rows[i].querySelector(".chapter-release-date");
+
+    result.push({
+      id: id,
+      chapter: number || undefined,
+      title: title || (number ? "الفصل " + number : id),
+      position: result.length,
+      pages: 0,
+      language: "ar",
+      publishAt: date ? clean(date.text()) : undefined
+    });
+  }
+
+  return result;
 }
 
 const plugin = {
@@ -112,84 +151,64 @@ const plugin = {
 
   async popular(offset) {
     var page = Math.floor((offset || 0) / 24) + 1;
-    var doc = await getDoc("/series/?page=" + page + "&m_orderby=views");
-    var result = listCards(doc);
-    return result.length ? result : fallbackSeriesLinks(doc);
+    var path = page === 1 ? "/series/?m_orderby=views" : "/series/?page=" + page + "&m_orderby=views";
+    return listSeries(await getDoc(path));
   },
 
   async search(query, offset) {
     var page = Math.floor((offset || 0) / 24) + 1;
     var path = "/?s=" + encodeURIComponent(query || "") + "&post_type=wp-manga";
     if (page > 1) path += "&paged=" + page;
-    var doc = await getDoc(path);
-    var result = listCards(doc);
-    return result.length ? result : fallbackSeriesLinks(doc);
+    return listSeries(await getDoc(path));
   },
 
   async detail(id) {
     var doc = await getDoc(seriesPath(id));
-    var titleNode = doc.querySelector(".post-title h1") || doc.querySelector("h1");
-    var summaryNode = doc.querySelector(".description-summary .summary__content");
-    var authorNode = doc.querySelector(".author-content a");
-    var statusNode = doc.querySelector(".post-status .summary-content");
-    var cover = doc.querySelector(".summary_image img") || doc.querySelector("img[alt]") || doc.querySelector("img");
+    var title = doc.querySelector(".post-title h1") || doc.querySelector("h1");
+    var cover = doc.querySelector(".summary_image img") || doc.querySelector("img[alt]");
+    var description = doc.querySelector(".description-summary .summary__content");
+    var author = doc.querySelector(".author-content a");
+    var status = doc.querySelector(".post-status .summary-content");
     var genreNodes = doc.querySelectorAll(".genres-content a");
     var genres = [];
+
     for (var i = 0; i < genreNodes.length; i++) {
       var g = clean(genreNodes[i].text());
       if (g) genres.push(g);
     }
-    var chapterNodes = doc.querySelectorAll(".wp-manga-chapter");
+
+    var chapterRows = readChapterRows(doc);
+
     return {
       id: id,
-      title: clean(titleNode ? titleNode.text() : "") || clean(id),
-      cover: imageUrl(cover),
-      description: summaryNode ? clean(summaryNode.text()) : undefined,
-      author: authorNode ? clean(authorNode.text()) : undefined,
-      status: statusNode ? clean(statusNode.text()) : undefined,
+      title: clean(title ? title.text() : id),
+      cover: getImage(cover),
+      description: description ? clean(description.text()) : undefined,
+      author: author ? clean(author.text()) : undefined,
+      status: status ? clean(status.text()) : undefined,
       originalLanguage: "zh",
       genres: genres,
-      chapters: chapterNodes.length || undefined
+      chapters: chapterRows.length || undefined
     };
   },
 
   async chapters(id) {
     var doc = await getDoc(seriesPath(id));
-    var rows = doc.querySelectorAll(".wp-manga-chapter");
-    var result = [], seen = {};
-
-    for (var i = 0; i < rows.length; i++) {
-      var a = rows[i].querySelector("a");
-      if (!a) continue;
-      var cid = chapterFromHref(a.attr("href") || "");
-      if (!cid || seen[cid]) continue;
-      seen[cid] = true;
-      var text = clean(a.text());
-      var number = chapterNumber(text);
-      var dateNode = rows[i].querySelector(".chapter-release-date");
-      result.push({
-        id: cid,
-        chapter: number || undefined,
-        title: text || (number ? "الفصل " + number : cid),
-        position: result.length,
-        pages: 0,
-        language: "ar",
-        publishAt: dateNode ? clean(dateNode.text()) : undefined
-      });
-    }
+    var result = readChapterRows(doc);
 
     if (!result.length) {
       var links = doc.querySelectorAll("a");
-      for (var j = 0; j < links.length; j++) {
-        var fallbackId = chapterFromHref(links[j].attr("href") || "");
-        if (!fallbackId || seen[fallbackId]) continue;
-        seen[fallbackId] = true;
-        var fallbackText = clean(links[j].text());
-        var fallbackNumber = chapterNumber(fallbackText);
+      var seen = {};
+      for (var i = 0; i < links.length; i++) {
+        var cid = getChapterId(links[i].attr("href") || "");
+        if (!cid || seen[cid]) continue;
+        seen[cid] = true;
+        var text = clean(links[i].text());
+        var number = getChapterNumber(text);
         result.push({
-          id: fallbackId,
-          chapter: fallbackNumber || undefined,
-          title: fallbackText || (fallbackNumber ? "الفصل " + fallbackNumber : fallbackId),
+          id: cid,
+          chapter: number || undefined,
+          title: text || (number ? "الفصل " + number : cid),
           position: result.length,
           pages: 0,
           language: "ar"
@@ -197,20 +216,21 @@ const plugin = {
       }
     }
 
+    // KolNovel returns newest chapters first. Harbor expects ascending positions.
     result.reverse();
-    for (var k = 0; k < result.length; k++) result[k].position = k;
+    for (var p = 0; p < result.length; p++) result[p].position = p;
     return result;
   },
 
-  async content(chapterIdValue) {
-    var path = pathFromHref(chapterIdValue);
+  async content(chapterId) {
+    var path = toPath(chapterId);
     if (!path) throw new Error("Invalid chapter id");
-    var doc = await getDoc(path);
 
+    var doc = await getDoc(path);
     var selectors = [
       ".text-left p",
+      ".text-left br",
       ".reading-content p",
-      ".chapter-content p",
       ".entry-content p",
       ".post-content p"
     ];
@@ -219,28 +239,26 @@ const plugin = {
       var nodes = doc.querySelectorAll(selectors[i]);
       var parts = [];
       for (var j = 0; j < nodes.length; j++) {
-        var value = clean(nodes[j].text());
-        if (!value) continue;
-        if (/^(Facebook|Twitter|WhatsApp|Pinterest|Telegram)$/iu.test(value)) continue;
-        parts.push(value);
+        var text = clean(nodes[j].text());
+        if (!text) continue;
+        parts.push(text);
       }
       if (parts.length >= 2) return parts.join("\n\n");
     }
 
-    var containers = [".text-left", ".reading-content", ".chapter-content", ".entry-content", ".post-content"];
+    var containers = [".text-left", ".reading-content", ".entry-content", ".post-content"];
     for (var c = 0; c < containers.length; c++) {
       var container = doc.querySelector(containers[c]);
       if (!container) continue;
-      var containerText = clean(container.text());
-      if (containerText) return containerText;
+      var value = clean(container.text());
+      if (value) return value;
     }
+
     return "";
   },
 
   async tags() {
     return [
-      { id: "ongoing", name: "مستمرة", group: "الحالة" },
-      { id: "completed", name: "مكتملة", group: "الحالة" },
       { id: "views", name: "الأكثر مشاهدة", group: "الترتيب" }
     ];
   }
