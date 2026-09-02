@@ -1,0 +1,15 @@
+{
+  "type": "ebook",
+  "name": "NAIF Manga & Novel Repo",
+  "plugins": [
+    {
+      "id": "kolnovel",
+      "name": "KolNovel",
+      "version": "1.0.0",
+      "lang": "ar",
+      "nsfw": false,
+      "icon": "https://kolnovel.com/favicon.ico",
+      "entry": "kolnovel.plugin.js"
+    }
+  ]
+}
