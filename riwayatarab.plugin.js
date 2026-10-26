@@ -97,6 +97,43 @@ async function mapLimit(items, fn) {
   return out;
 }
 
+// ---------- covers ----------
+const COVER_RE = /https?:(?:\\?\/){2}[^"'()\s\\<>]+?\/covers\/[^"'()\s\\<>]+/i;
+function coverFrom(node) {
+  const imgs = arr(node.querySelectorAll("img")).concat(arr(node.querySelectorAll("source")));
+  for (const im of imgs) {
+    for (const k of ["src", "data-src", "data-lazy-src", "srcset", "data-srcset"]) {
+      let v = im.attr(k);
+      if (!v) continue;
+      v = String(v).split(",")[0].trim().split(/\s+/)[0];
+      const u = abs(v);
+      if (u) return u;
+    }
+  }
+  const all = [node].concat(arr(node.querySelectorAll("*")));
+  for (const el of all) {
+    const m = String(el.attr("style") || "").match(/url\(["']?([^"')]+)["']?\)/);
+    if (m) { const u = abs(m[1]); if (u) return u; }
+  }
+  return undefined;
+}
+const coverCache = {};
+async function coverOf(id) {
+  if (id in coverCache) return coverCache[id];
+  let c;
+  try {
+    const raw = await getRaw(`${BASE}/novel/${id}`);
+    const m = raw.match(COVER_RE);
+    if (m) c = abs(m[0].replace(/\\\//g, "/").replace(/\\u002F/gi, "/"));
+  } catch (_) {}
+  return (coverCache[id] = c);
+}
+async function enrichCovers(list) {
+  const missing = list.filter((n) => !n.cover);
+  await mapLimit(missing, async (n) => { n.cover = await coverOf(n.id); });
+  return list;
+}
+
 // ---------- listing (/latest cards) ----------
 function parseCards(doc) {
   const out = [];
@@ -115,9 +152,7 @@ function parseCards(doc) {
     if (h && clean(h.text())) title = clean(h.text());
     if (!title) continue;
 
-    let cover;
-    const img = a.querySelector("img");
-    if (img) cover = abs(img.attr("src") || img.attr("data-src"));
+    const cover = coverFrom(a);
 
     const nums = text.match(/([\d.,]+[كK]?)\s+(\d+)\s+\d+\s+آخر تحديث/);
     const desc = text.match(/بقلم:\s*[^]*$/);
@@ -167,7 +202,7 @@ const provider = {
 
   async popular(offset) {
     const page = Math.floor(offset / PAGE_SIZE) + 1;
-    return latestPage(page);
+    return enrichCovers(await latestPage(page));
   },
 
   async search(query, offset) {
@@ -178,7 +213,7 @@ const provider = {
       const t = normAr(n.title);
       return words.every((w) => t.includes(w));
     });
-    return hits.slice(offset, offset + PAGE_SIZE);
+    return enrichCovers(hits.slice(offset, offset + PAGE_SIZE));
   },
 
   async detail(id) {
@@ -194,6 +229,8 @@ const provider = {
       const src = abs(img.attr("src") || img.attr("data-src"));
       if (src && /\/covers\//.test(src)) { cover = src; break; }
     }
+
+    if (!cover) cover = await coverOf(id);
 
     const author = (text.match(/بقلم:\s*(.+?)\s+[\d.,]+[كK]?\s*مشاهدة/) || [])[1];
     const desc = (text.match(/نبذة عن الرواية\s*(.*?)\s*قائمة الفصول/) || [])[1];
