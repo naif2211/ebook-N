@@ -1,15 +1,16 @@
+
+Repo · JSON
 {
   "type": "ebook",
-  "name": "NAIF Manga & Novel Repo",
+  "name": "رواياتعرب Repo",
   "plugins": [
     {
-      "id": "kolnovel",
-      "name": "KolNovel",
-      "version": "1.1.0",
+      "id": "riwayatarab",
+      "name": "رواياتعرب",
+      "version": "1.0.0",
       "lang": "ar",
       "nsfw": false,
-      "icon": "https://kolnovel.com/favicon.ico",
-      "entry": "kolnovel.plugin.js"
+      "entry": "riwayatarab.plugin.js"
     }
   ]
 }
