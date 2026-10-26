@@ -1,5 +1,3 @@
-
-Repo · JSON
 {
   "type": "ebook",
   "name": "رواياتعرب Repo",
@@ -7,10 +5,10 @@ Repo · JSON
     {
       "id": "riwayatarab",
       "name": "رواياتعرب",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "lang": "ar",
       "nsfw": false,
-      "entry": "riwayatarab.plugin.js"
+      "entry": "kolnovel.plugin.js"
     }
   ]
 }
