@@ -248,24 +248,37 @@ const provider = {
     const [slug, num] = chapterId.split("/");
     const doc = await getHtml(`${BASE}/novel/${slug}/chapter/${num}`);
 
-    // Narrowest container first; take the first that yields real paragraphs.
-    const containers = [
-      ".chapter-content", "#chapter-content", "[class*='chapter-content']",
-      "[class*='prose']", "article", "main",
-    ];
-    let lines = [];
-    for (const sel of containers) {
-      const el = doc.querySelector(sel);
-      if (!el) continue;
+    const toLines = (el) => {
       const ps = el.querySelectorAll("p");
-      let got = ps.length >= 3
-        ? ps.map((p) => clean(stripInline(p.text())))
-        : el.text().split(/\r?\n+/).map((l) => clean(stripInline(l)));
-      got = got.filter((l) => l && !isSpamLine(l));
-      if (got.length >= 3) { lines = got; break; }
+      const raw = ps.length >= 2
+        ? ps.map((p) => p.text())
+        : String(el.text()).split(/\r?\n+/);
+      return raw.map((l) => clean(stripInline(l))).filter((l) => l && !isSpamLine(l));
+    };
+
+    // Score every plausible container by how much real chapter text it yields,
+    // then take the best one (the narrowest wins ties via smaller raw length).
+    let best = [], bestScore = 0, bestRaw = Infinity;
+    const sels = ["article", "main", "section", "div"];
+    for (const sel of sels) {
+      for (const el of doc.querySelectorAll(sel)) {
+        const raw = clean(el.text()).length;
+        if (raw < 200) continue;
+        const lines = toLines(el);
+        const score = lines.join("").length;
+        if (score > bestScore * 1.02 || (score >= bestScore * 0.98 && score > 0 && raw < bestRaw)) {
+          best = lines; bestScore = score; bestRaw = raw;
+        }
+      }
     }
-    // document order preserved: no sort/reverse/dedupe
-    return { text: lines.join("\n\n") };
+
+    // Trim page chrome that can sit inside the container.
+    const t = clean(doc.querySelector("h1") ? doc.querySelector("h1").text() : "");
+    best = best.filter((l) => l !== t && !/^(رواياتعرب|الرئيسية|البحث|تسجيل الدخول|إنشاء حساب)$/.test(l)
+      && !/عرض قائمة الفصول|جميع الحقوق محفوظة|موقعك المفضل لقراءة/.test(l));
+
+    // Document order preserved: no sort/reverse/dedupe.
+    return { text: best.join("\n\n") };
   },
 };
 
