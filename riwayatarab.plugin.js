@@ -23,16 +23,28 @@ const abs = (u) => {
   return /^https?:\/\//i.test(u) ? u : undefined;
 };
 
-async function getHtml(url) {
+async function getRaw(url) {
   const res = await harbor.http(url, { responseType: "text", timeoutMs: 20000 });
-  const html = typeof res === "string" ? res : (res.text ?? res.body ?? res.data ?? "");
-  return harbor.parseHtml(html);
+  return typeof res === "string" ? res : String(res.text ?? res.body ?? res.data ?? "");
 }
+async function getHtml(url) {
+  return harbor.parseHtml(await getRaw(url));
+}
+const arr = (x) => (x ? Array.from(x) : []);
+const decodeEntities = (t) => t
+  .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+  .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
 
 const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
 
 // Spam/watermarks the site (or its upstream scrapes) injects into text.
 const SPAM_INLINE = [
+  /حقوق\s*\$\$[^$]*\$\$[^\n]*?المستقبل\s*-?!!-?/g,
+  /حقوق\s*\$\$[^$]*\$\$/g,
+  /افخم\s*واسرع\s*واكبر[^\n]*?المستقبل\s*-?!!-?/g,
+  /الفصل\s*\d+\s*:\s*0*\d+(?=\s|$)/g,
   /\*?\s*إقرأ\*?\s*رواياتنا\*?\s*فقط\*?\s*على\*?\s*مو\*?قع\s*م\*?لوك\s*الرو\*?ايات\s*ko\*?lno\*?vel\s*ko\*?lno\*?vel\.?\s*com/gi,
   /ko\*?lno\*?vel(\.?\s*com)?/gi,
   /\b2{6,}\b/g,
@@ -46,7 +58,7 @@ const SPAM_LINE = [
   /^(الفصل\s*)?(التالي|السابق)$/,
 ];
 const stripInline = (s) => SPAM_INLINE.reduce((t, re) => t.replace(re, " "), s || "");
-const isSpamLine = (l) => SPAM_LINE.some((re) => re.test(l));
+const isSpamLine = (l) => l.length < 200 && SPAM_LINE.some((re) => re.test(l));
 
 const normAr = (s) =>
   (s || "").toLowerCase()
@@ -88,7 +100,7 @@ async function mapLimit(items, fn) {
 // ---------- listing (/latest cards) ----------
 function parseCards(doc) {
   const out = [];
-  for (const a of doc.querySelectorAll("a")) {
+  for (const a of arr(doc.querySelectorAll("a"))) {
     const href = a.attr("href") || "";
     if (!/\/novel\/[^/?#]+\/?$/.test(href.replace(BASE, ""))) continue;
     const slug = slugFromHref(href);
@@ -137,7 +149,7 @@ async function fullIndex() {
   if (indexCache) return indexCache;
   const first = await getHtml(`${BASE}/latest`);
   let last = 1;
-  for (const a of first.querySelectorAll("a")) {
+  for (const a of arr(first.querySelectorAll("a"))) {
     const m = (a.attr("href") || "").match(/latest\?page=(\d+)/);
     if (m) last = Math.max(last, Number(m[1]));
   }
@@ -178,7 +190,7 @@ const provider = {
     if (!title) return null;
 
     let cover;
-    for (const img of doc.querySelectorAll("img")) {
+    for (const img of arr(doc.querySelectorAll("img"))) {
       const src = abs(img.attr("src") || img.attr("data-src"));
       if (src && /\/covers\//.test(src)) { cover = src; break; }
     }
@@ -186,7 +198,7 @@ const provider = {
     const author = (text.match(/بقلم:\s*(.+?)\s+[\d.,]+[كK]?\s*مشاهدة/) || [])[1];
     const desc = (text.match(/نبذة عن الرواية\s*(.*?)\s*قائمة الفصول/) || [])[1];
     const genres = [];
-    for (const a of doc.querySelectorAll("a")) {
+    for (const a of arr(doc.querySelectorAll("a"))) {
       if (/[?&]category=/.test(a.attr("href") || "")) {
         const g = clean(a.text());
         if (g && !genres.includes(g)) genres.push(g);
@@ -218,7 +230,7 @@ const provider = {
 
     const parse = (doc) => {
       const rows = [];
-      for (const a of doc.querySelectorAll("a")) {
+      for (const a of arr(doc.querySelectorAll("a"))) {
         const href = a.attr("href") || "";
         const m = href.match(/\/novel\/[^/?#]+\/chapter\/([^/?#]+)/);
         if (!m) continue;
@@ -246,26 +258,54 @@ const provider = {
 
   async content(chapterId) {
     const [slug, num] = chapterId.split("/");
-    const doc = await getHtml(`${BASE}/novel/${slug}/chapter/${num}`);
+    const url = `${BASE}/novel/${slug}/chapter/${num}`;
+    const html = await getRaw(url);
 
-    // Narrowest container first; take the first that yields real paragraphs.
-    const containers = [
-      ".chapter-content", "#chapter-content", "[class*='chapter-content']",
-      "[class*='prose']", "article", "main",
-    ];
-    let lines = [];
-    for (const sel of containers) {
-      const el = doc.querySelector(sel);
-      if (!el) continue;
-      const ps = el.querySelectorAll("p");
-      let got = ps.length >= 3
-        ? ps.map((p) => clean(stripInline(p.text())))
-        : el.text().split(/\r?\n+/).map((l) => clean(stripInline(l)));
-      got = got.filter((l) => l && !isSpamLine(l));
-      if (got.length >= 3) { lines = got; break; }
+    // 1) DOM route
+    let best = [];
+    try {
+      const doc = harbor.parseHtml(html);
+      const toLines = (el) => {
+        const ps = arr(el.querySelectorAll("p"));
+        const raw = ps.length >= 2 ? ps.map((p) => p.text()) : String(el.text()).split(/\r?\n+/);
+        return raw.map((l) => clean(stripInline(l))).filter((l) => l && !isSpamLine(l));
+      };
+      let bestScore = 0, bestRaw = Infinity;
+      for (const sel of ["article", "main", "section", "div"]) {
+        for (const el of arr(doc.querySelectorAll(sel))) {
+          const raw = clean(el.text()).length;
+          if (raw < 200) continue;
+          const lines = toLines(el);
+          const score = lines.join("").length;
+          if (score > bestScore * 1.02 || (score >= bestScore * 0.98 && score > 0 && raw < bestRaw)) {
+            best = lines; bestScore = score; bestRaw = raw;
+          }
+        }
+      }
+    } catch (_) { best = []; }
+
+    // 2) Raw-HTML fallback: text between the chapter <h1> and the prev/next navigation
+    if (best.join("").length < 200) {
+      let h = html.replace(/<(script|style|iframe|noscript)[\s\S]*?<\/\1>/gi, " ");
+      const parts = h.split(/<\/h1>/i);
+      if (parts.length > 1) h = parts.slice(1).join("</h1>");
+      h = h.replace(/<\/(p|div|li|h\d|section|article)>|<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, " ");
+      const lines = decodeEntities(h).split(/\r?\n+/).map((l) => clean(stripInline(l))).filter(Boolean);
+      const out = [];
+      for (const l of lines) {
+        if (/^(الفصل السابق|الفصل التالي|السابق|التالي)(\s|$)/.test(l) || /^الفصل\s*\d+\s*من\s*\d+/.test(l)) break;
+        if (!isSpamLine(l)) out.push(l);
+      }
+      if (out.join("").length > best.join("").length) best = out;
     }
-    // document order preserved: no sort/reverse/dedupe
-    return { text: lines.join("\n\n") };
+
+    const h1 = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1];
+    const t = h1 ? clean(decodeEntities(h1.replace(/<[^>]+>/g, " "))) : "";
+    best = best.filter((l) => l !== t && !/^(رواياتعرب|الرئيسية|البحث|تسجيل الدخول|إنشاء حساب)$/.test(l)
+      && !/عرض قائمة الفصول|جميع الحقوق محفوظة|موقعك المفضل لقراءة/.test(l));
+
+    // Document order preserved: no sort/reverse/dedupe.
+    return { text: best.join("\n\n") };
   },
 };
 
